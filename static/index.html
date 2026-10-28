@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Alexis — análisis de reportes</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #172033;
+        background: #f3f6fb;
+      }
+
+      body {
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 32px 20px;
+      }
+
+      main {
+        padding: 28px;
+        border: 1px solid #dce3ee;
+        border-radius: 16px;
+        background: #fff;
+        box-shadow: 0 8px 28px rgb(22 38 66 / 8%);
+      }
+
+      h1 { margin-top: 0; }
+      button, input { font: inherit; }
+      button {
+        margin: 8px 8px 8px 0;
+        padding: 10px 16px;
+        border: 0;
+        border-radius: 8px;
+        color: white;
+        background: #1457c5;
+        cursor: pointer;
+      }
+
+      button:disabled { opacity: 0.6; cursor: wait; }
+      input[type="file"], textarea { display: block; margin: 12px 0; }
+      textarea { box-sizing: border-box; width: 100%; min-height: 84px; padding: 10px; }
+      #status { min-height: 1.5em; color: #3e4c63; }
+      #result {
+        margin-top: 24px;
+        padding: 18px;
+        border-radius: 10px;
+        background: #f3f6fb;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .hint { color: #58667c; font-size: 0.95rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Alexis — análisis de reportes</h1>
+      <p>Alexis puede pedir el reporte en voz alta, recibir una pregunta dictada, clasificarlo y leer el resultado.</p>
+      <button id="startVoice" type="button">Iniciar conversación</button>
+      <button id="microphone" type="button">Dictar una solicitud</button>
+      <p id="status" role="status" aria-live="polite"></p>
+
+      <form id="reportForm">
+        <label for="report">Selecciona un reporte (PDF, DOCX o TXT; máximo 15 MB):</label>
+        <input id="report" name="file" type="file" accept=".pdf,.docx,.txt" required>
+        <label for="question">¿Qué quieres saber del reporte? Puedes escribir o dictar una pregunta (opcional):</label>
+        <textarea id="question" name="question" maxlength="1000" placeholder="Ejemplo: ¿Cuáles fueron las principales variaciones?"></textarea>
+        <button id="analyze" type="submit">Analizar reporte</button>
+      </form>
+
+      <p class="hint">
+        La aplicación no conserva archivos ni historial; el servidor puede usar almacenamiento temporal durante la carga. Un PDF escaneado requiere OCR.
+        Para dictado, el navegador debe admitir reconocimiento de voz y tener permiso
+        para usar el micrófono.
+      </p>
+      <section id="result" hidden aria-live="polite"></section>
+    </main>
+
+    <script>
+      const status = document.querySelector("#status");
+      const form = document.querySelector("#reportForm");
+      const fileInput = document.querySelector("#report");
+      const questionInput = document.querySelector("#question");
+      const analyzeButton = document.querySelector("#analyze");
+      const resultPanel = document.querySelector("#result");
+      const spanishLabels = {
+        financial: "financiero",
+        technical: "técnico",
+        uncertain: "incierto"
+      };
+
+      function speak(message) {
+        if (!("speechSynthesis" in window)) {
+          status.textContent = "Este navegador no tiene lectura de voz; puedes leer el resultado en pantalla.";
+          return;
+        }
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(message);
+        utterance.lang = "es-MX";
+        const spanishVoice = window.speechSynthesis.getVoices()
+          .find((voice) => voice.lang.toLowerCase().startsWith("es"));
+        if (spanishVoice) utterance.voice = spanishVoice;
+        window.speechSynthesis.speak(utterance);
+      }
+
+      document.querySelector("#startVoice").addEventListener("click", () => {
+        const message = "Hola, soy Alexis. Por favor, selecciona el reporte que quieres analizar. Si tienes una pregunta, puedes dictarla o escribirla antes de pulsar Analizar reporte.";
+        status.textContent = message;
+        speak(message);
+      });
+
+      document.querySelector("#microphone").addEventListener("click", () => {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+          status.textContent = "El dictado no está disponible en este navegador. Prueba Chrome o Edge, o adjunta el archivo directamente.";
+          return;
+        }
+
+        const recognition = new SpeechRecognition();
+        recognition.lang = "es-MX";
+        recognition.interimResults = false;
+        recognition.maxAlternatives = 1;
+        status.textContent = "Te escucho…";
+        recognition.onresult = (event) => {
+          const transcript = event.results[0][0].transcript;
+          questionInput.value = transcript;
+          const message = `Te escuché: ${transcript}. Ahora selecciona el reporte y pulsa Analizar reporte.`;
+          status.textContent = message;
+          speak(message);
+        };
+        recognition.onerror = (event) => {
+          status.textContent = `No se pudo completar el dictado (${event.error}). Puedes adjuntar el archivo directamente.`;
+        };
+        recognition.start();
+      });
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (!fileInput.files.length) return;
+
+        analyzeButton.disabled = true;
+        resultPanel.hidden = true;
+        status.textContent = "Alexis está clasificando el reporte y solicitando el análisis…";
+        const formData = new FormData();
+        formData.append("file", fileInput.files[0]);
+        formData.append("question", questionInput.value);
+
+        try {
+          const response = await fetch("/api/reports/analyze", {
+            method: "POST",
+            body: formData
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.detail || `Error HTTP ${response.status}`);
+
+          const { classification, analysis } = payload;
+          const category = spanishLabels[classification.category] || classification.category;
+          let spokenResult = `Alexis clasifica el reporte como ${category}. Motivo: ${classification.rationale}.`;
+          if (analysis) spokenResult += ` Análisis: ${analysis}`;
+          else spokenResult += " No hay evidencia suficiente para seleccionar un analista.";
+
+          resultPanel.textContent =
+            `Clasificación: ${category}\n` +
+            `Confianza: ${Math.round(classification.confidence * 100)}%\n` +
+            `Motivo: ${classification.rationale}\n\n` +
+            (analysis || "No se llamó a un analista porque la clasificación fue incierta.");
+          resultPanel.hidden = false;
+          status.textContent = "Análisis terminado.";
+          speak(spokenResult);
+        } catch (error) {
+          status.textContent = `No se pudo analizar el reporte: ${error.message}`;
+          speak(`No se pudo analizar el reporte. ${error.message}`);
+        } finally {
+          analyzeButton.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>
